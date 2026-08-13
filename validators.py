@@ -45,9 +45,17 @@ def extract_input(text: str) -> tuple[str, str]:
     if text.lower().startswith("magnet:?"):
         magnet_hash(text)
         return "magnet", text
+    if re.fullmatch(r"[0-9a-fA-F]{40}", text):
+        return "magnet", f"magnet:?xt=urn:btih:{text.lower()}"
+    if re.fullmatch(r"[A-Z2-7a-z2-7]{32}", text):
+        try:
+            base64.b32decode(text.upper())
+        except ValueError as exc:
+            raise ValidationError("Hash Base32 non valido") from exc
+        return "magnet", f"magnet:?xt=urn:btih:{text.upper()}"
     if text.lower().startswith(("http://", "https://")):
         return "url", direct_torrent_url(text)
-    raise ValidationError("Invia un Magnet URL o un URL diretto a un file .torrent")
+    raise ValidationError("Invia un Magnet URL, un hash BitTorrent v1 o un URL diretto a un file .torrent")
 
 
 def _decode(data: bytes, offset: int = 0):

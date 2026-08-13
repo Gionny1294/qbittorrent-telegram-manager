@@ -40,6 +40,9 @@ def settings(tmpdir):
         rate_limit_requests=100,
         rate_limit_window=60,
         button_debounce_seconds=3,
+        delete_confirmation_seconds=300,
+        title_max_length=70,
+        timezone="Europe/Rome",
         log_path=Path(tmpdir) / "bot.log",
         health_file=Path(tmpdir) / "healthy",
         disk_check_path="/downloads",
@@ -49,10 +52,13 @@ def settings(tmpdir):
 
 class FakeTelegram:
     def __init__(self):
-        self.sent, self.answers = [], []
+        self.sent, self.edited, self.answers = [], [], []
 
-    def send(self, chat_id, text, keyboard=None):
+    def send(self, chat_id, text, keyboard=None, parse_mode=None):
         self.sent.append((chat_id, text, keyboard))
+
+    def edit(self, chat_id, message_id, text, keyboard=None, parse_mode=None):
+        self.edited.append((chat_id, message_id, text, keyboard))
 
     def answer_callback(self, callback_id, text=""):
         self.answers.append((callback_id, text))
@@ -67,7 +73,12 @@ class FakeQBit:
         return self.items
 
     def torrent(self, info_hash):
-        return next(item for item in self.items if item["hash"] == info_hash)
+        from qbittorrent_client import QBitError
+
+        try:
+            return next(item for item in self.items if item["hash"] == info_hash)
+        except StopIteration as exc:
+            raise QBitError("Torrent non trovato") from exc
 
     def action(self, action, info_hash):
         self.actions.append((action, info_hash))
@@ -101,4 +112,6 @@ def torrent(state="downloading", progress=0.5):
         "dlspeed": 10,
         "eta": 5,
         "ratio": 0.2,
+        "amount_left": 50,
+        "upspeed": 0,
     }

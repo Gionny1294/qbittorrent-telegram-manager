@@ -1,7 +1,14 @@
 import hashlib
 import unittest
 
-from validators import ValidationError, magnet_hash, safe_destination, sanitize_filename, torrent_metadata
+from validators import (
+    ValidationError,
+    extract_input,
+    magnet_hash,
+    safe_destination,
+    sanitize_filename,
+    torrent_metadata,
+)
 
 
 class MagnetTests(unittest.TestCase):
@@ -12,6 +19,14 @@ class MagnetTests(unittest.TestCase):
     def test_invalid_magnet(self):
         with self.assertRaises(ValidationError):
             magnet_hash("magnet:?dn=no-hash")
+
+    def test_bare_hex_hash_is_converted_to_magnet(self):
+        value = "0123456789abcdef0123456789abcdef01234567"
+        self.assertEqual(extract_input(value), ("magnet", f"magnet:?xt=urn:btih:{value}"))
+
+    def test_bare_base32_hash_is_converted_to_magnet(self):
+        value = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+        self.assertEqual(extract_input(value), ("magnet", f"magnet:?xt=urn:btih:{value}"))
 
 
 class TorrentMetadataTests(unittest.TestCase):

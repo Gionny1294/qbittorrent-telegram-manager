@@ -11,6 +11,7 @@ Distribuito con [licenza MIT](LICENSE).
 - elenchi, ricerca, paginazione e schede dettagliate;
 - pausa, ripresa, forza avvio, ricontrollo ed eliminazione confermata;
 - notifiche persistenti, cronologia SQLite, coda e profili di velocità;
+- notifiche di completamento compatte, pulsanti coerenti con lo stato e rimozione a conferma temporanea;
 - stato server e integrazione Plex opzionale;
 - container non-root, filesystem in sola lettura e healthcheck.
 
@@ -67,6 +68,8 @@ Il file `.env.example` descrive tutte le variabili. Sono obbligatorie:
 Le credenziali qBittorrent sono necessarie quando l'autenticazione è abilitata. I percorsi categoria devono corrispondere a quelli visibili da qBittorrent. `MEDIA_ROOT_HOST` viene montato dal bot in sola lettura per misurare lo spazio.
 
 Per Plex compilare `PLEX_URL`, `PLEX_TOKEN`, `PLEX_MOVIE_SECTION_ID` e `PLEX_SERIES_SECTION_ID`. Lasciando URL o token vuoti, Plex è disabilitato e il bot continua a funzionare.
+
+`TITLE_MAX_LENGTH` limita il titolo mostrato nelle notifiche senza rinominare file o torrent. `DELETE_CONFIRMATION_SECONDS` stabilisce la durata delle conferme distruttive e `TZ` controlla l'orario locale visualizzato.
 
 ## Comandi
 
