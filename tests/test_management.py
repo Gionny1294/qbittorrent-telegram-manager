@@ -3,11 +3,38 @@ import unittest
 
 from bot import Bot
 from database import Database
+from qbittorrent_client import QBitError
 from tests.fakes import FakeQBit, FakeTelegram, settings, torrent
-from torrent_manager import paginate
+from torrent_manager import filter_torrents, paginate
 
 
 class TorrentManagementTests(unittest.TestCase):
+    def test_ambiguous_add_response_is_success_when_torrent_exists(self):
+        class AmbiguousAddQBit(FakeQBit):
+            def contains(self, info_hash):
+                return any(item.get("hash") == info_hash for item in self.items)
+
+            def add_url(self, url, save_path, category):
+                self.items.append({"hash": "a" * 40, "name": "Example"})
+                raise QBitError("qBittorrent non ha accettato il torrent")
+
+        qbit = AmbiguousAddQBit()
+        bot = Bot(self.settings, self.telegram, qbit, Database(self.settings.database_path))
+        payload = {
+            "hash": "a" * 40,
+            "name": "Example",
+            "category": "film",
+            "source": "magnet:?xt=urn:btih:" + "a" * 40,
+        }
+        bot.db.create_operation("add-op", 123, "magnet", payload)
+
+        bot.confirm(
+            {"from": {"id": 123}, "message": {"chat": {"id": 456}}},
+            "add-op",
+        )
+
+        self.assertIn("Torrent aggiunto: Example", self.telegram.sent[-1][1])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.settings = settings(self.temp.name)
@@ -62,6 +89,22 @@ class TorrentManagementTests(unittest.TestCase):
 
 
 class PaginationTests(unittest.TestCase):
+    def test_downloading_group_only_contains_transferring_torrents(self):
+        items = [
+            torrent("downloading"),
+            torrent("forcedDL"),
+            torrent("stalledDL"),
+            torrent("queuedDL"),
+            torrent("stoppedDL"),
+            torrent("uploading", 1),
+        ]
+        for index, item in enumerate(items):
+            item["hash"] = str(index) * 40
+
+        result = filter_torrents(items, "downloading")
+
+        self.assertEqual({item["state"] for item in result}, {"downloading", "forcedDL", "stalledDL"})
+
     def test_pages_are_bounded(self):
         items, page, pages = paginate(list(range(5)), 1, 2)
         self.assertEqual(items, [2, 3])
