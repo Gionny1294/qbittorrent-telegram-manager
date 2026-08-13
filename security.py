@@ -55,8 +55,8 @@ class InteractionGuard:
     def allow(self, key):
         now = time.monotonic()
         with self.lock:
-            previous = self.seen.get(key, 0)
-            if now - previous < self.seconds:
+            previous = self.seen.get(key)
+            if previous is not None and now - previous < self.seconds:
                 return False
             self.seen[key] = now
             if len(self.seen) > 1000:
