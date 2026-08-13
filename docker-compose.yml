@@ -1,0 +1,42 @@
+services:
+  bot:
+    build:
+      context: .
+      args:
+        APP_UID: ${PUID:-1000}
+        APP_GID: ${PGID:-1000}
+    image: qbittorrent-telegram-bot:local
+    restart: unless-stopped
+    env_file:
+      - ${BOT_ENV_FILE:-.env}
+    environment:
+      TZ: ${TZ:-UTC}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ${MEDIA_ROOT_HOST:-./downloads}:/downloads:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    init: true
+    stop_grace_period: 40s
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    mem_limit: 256m
+    cpus: 0.50
+    pids_limit: 100
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
