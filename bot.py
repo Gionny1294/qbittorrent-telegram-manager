@@ -1,8 +1,10 @@
 import datetime
+import html
 import logging
 import os
 import signal
 import threading
+import time
 import urllib.parse
 import uuid
 from contextlib import suppress
@@ -15,20 +17,24 @@ from security import InteractionGuard, RateLimiter, configure_logging, is_author
 from telegram_api import TelegramAPI, TelegramError
 from torrent_manager import (
     ERROR_STATES,
+    completion_text,
     details_text,
     enforce_queue,
     filter_torrents,
     in_night_window,
+    is_complete,
     paginate,
+    supported_actions,
     system_metrics,
 )
 from ui import (
     CATEGORIES,
     category_keyboard,
     confirm_keyboard,
-    delete_confirmation,
+    final_delete_confirmation,
     human_size,
     main_menu,
+    removal_menu,
     settings_keyboard,
     torrent_actions,
     torrent_list_keyboard,
@@ -169,7 +175,7 @@ class Bot:
         user_id, chat_id = callback["from"]["id"], callback["message"]["chat"]["id"]
         operation = self.db.claim_operation(operation_id, user_id)
         if not operation or category not in CATEGORIES:
-            self.telegram.answer_callback(callback["id"], "Operazione scaduta")
+            self._respond(chat_id, "Operazione scaduta.", {"inline_keyboard": []}, callback)
             return
         path = safe_destination(self.settings.category_paths[category], self.allowed_roots)
         payload = operation["payload"] | {"category": category}
@@ -189,13 +195,12 @@ class Bot:
             f"File: {file_text}\nSpazio libero: {human_size(free) if free is not None else 'non disponibile'}"
         )
         self.telegram.send(chat_id, text, confirm_keyboard(next_id))
-        self.telegram.answer_callback(callback["id"])
 
     def confirm(self, callback, operation_id):
         user_id, chat_id = callback["from"]["id"], callback["message"]["chat"]["id"]
         operation = self.db.claim_operation(operation_id, user_id)
         if not operation:
-            self.telegram.answer_callback(callback["id"], "Operazione scaduta")
+            self._respond(chat_id, "Operazione scaduta.", {"inline_keyboard": []}, callback)
             return
         payload = operation["payload"]
         try:
@@ -230,9 +235,8 @@ class Bot:
         self.db.record(user_id, "added", payload["hash"], category)
         log.info("Torrent aggiunto ref=%s", safe_reference(payload["hash"]))
         self.telegram.send(chat_id, f"Torrent aggiunto: {payload['name']}", main_menu())
-        self.telegram.answer_callback(callback["id"])
 
-    def list_torrents(self, chat_id, group="active", page=0, query=None, user_id=None):
+    def list_torrents(self, chat_id, group="active", page=0, query=None, user_id=None, callback=None):
         callback_group = group
         actual_group = group
         if query and user_id:
@@ -244,31 +248,128 @@ class Bot:
         torrents = filter_torrents(self.qbit.torrents(), actual_group, query)
         items, page, pages = paginate(torrents, page, self.settings.page_size)
         title = f"{GROUP_LABELS.get(actual_group, 'Ricerca torrent')} — {len(torrents)} risultati"
-        self.telegram.send(chat_id, title, torrent_list_keyboard(items, callback_group, page, pages))
+        self._respond(chat_id, title, torrent_list_keyboard(items, callback_group, page, pages), callback)
 
-    def show_details(self, chat_id, info_hash):
+    def _respond(self, chat_id, text, keyboard=None, callback=None, parse_mode=None):
+        message_id = (callback or {}).get("message", {}).get("message_id")
+        if message_id:
+            return self.telegram.edit(chat_id, message_id, text, keyboard, parse_mode)
+        return self.telegram.send(chat_id, text, keyboard, parse_mode)
+
+    def _torrent_keyboard(self, torrent):
+        return torrent_actions(torrent, self.plex.can_scan(torrent.get("category", "")))
+
+    def show_details(self, chat_id, info_hash, callback=None):
         torrent = self.qbit.torrent(info_hash)
-        self.telegram.send(
+        self._respond(
             chat_id,
             details_text(torrent, self.qbit.properties(info_hash), self.qbit.trackers(info_hash)),
-            torrent_actions(info_hash),
+            self._torrent_keyboard(torrent),
+            callback,
+            "HTML",
         )
 
-    def torrent_action(self, user_id, chat_id, action, info_hash):
+    def torrent_action(self, user_id, chat_id, action, info_hash, callback=None):
         torrent = self.qbit.torrent(info_hash)
+        if action not in supported_actions(torrent):
+            raise QBitError("Azione non più disponibile per lo stato corrente")
         self.qbit.action(action, info_hash)
         self.db.record(user_id, action, info_hash, torrent.get("name"))
-        self.telegram.send(chat_id, f"Azione eseguita: {action}")
+        refreshed = self.qbit.torrent(info_hash)
+        self._respond(chat_id, details_text(refreshed), self._torrent_keyboard(refreshed), callback, "HTML")
 
-    def remove_torrent(self, user_id, chat_id, info_hash, files):
+    def remove_torrent(self, user_id, chat_id, info_hash, files, callback=None):
         torrent = self.qbit.torrent(info_hash)
         save_path = torrent.get("save_path", "")
         safe_destination(save_path, self.allowed_roots)
         self.qbit.delete(info_hash, files)
-        self.db.record(user_id, "deleted_files" if files else "deleted", info_hash, torrent.get("name"))
-        self.telegram.send(
-            chat_id, "Torrent e file rimossi." if files else "Torrent rimosso; file conservati.", main_menu()
+        self.db.record(user_id, "deleted_files" if files else "deleted", info_hash, None)
+        self._respond(
+            chat_id,
+            "Torrent e file rimossi." if files else "Torrent rimosso; file conservati.",
+            {"inline_keyboard": [[{"text": "📂 Altri completati", "callback_data": "list:completed:0"}]]},
+            callback,
         )
+
+    def _new_delete_operation(self, user_id, chat_id, torrent, kind="delete_menu"):
+        operation_id = uuid.uuid4().hex[:16]
+        self.db.create_operation(
+            operation_id,
+            user_id,
+            kind,
+            {"chat_id": chat_id, "hash": torrent["hash"]},
+        )
+        return operation_id
+
+    def _claim_delete_operation(self, operation_id, user_id, chat_id, expected_kind):
+        operation = self.db.operation(operation_id, user_id)
+        if not operation or operation["kind"] != expected_kind:
+            return None
+        if (
+            operation["payload"].get("chat_id") != chat_id
+            or time.time() - operation["created_at"] > self.settings.delete_confirmation_seconds
+        ):
+            self.db.finish_operation(operation_id, "expired")
+            return None
+        return self.db.claim_operation(operation_id, user_id)
+
+    def show_removal_menu(self, callback, info_hash):
+        chat_id, user_id = callback["message"]["chat"]["id"], callback["from"]["id"]
+        torrent = self.qbit.torrent(info_hash)
+        operation_id = self._new_delete_operation(user_id, chat_id, torrent)
+        text = f"<b>Cosa vuoi rimuovere?</b>\n{html.escape(str(torrent.get('name', 'Torrent')))}"
+        size = torrent.get("total_size", torrent.get("size", 0))
+        if size:
+            text += f"\n💾 {human_size(size, 2, True, True)}"
+        self._respond(chat_id, text, removal_menu(operation_id), callback, "HTML")
+
+    def handle_delete(self, callback, action, operation_id):
+        chat_id, user_id = callback["message"]["chat"]["id"], callback["from"]["id"]
+        if action not in {"keep", "files", "confirm", "cancel"}:
+            self._respond(chat_id, "Operazione non valida.", {"inline_keyboard": []}, callback)
+            return
+        if action == "cancel":
+            operation = self.db.operation(operation_id, user_id)
+            if operation and operation["payload"].get("chat_id") == chat_id:
+                self.db.finish_operation(operation_id, "cancelled")
+                try:
+                    self.show_details(chat_id, operation["payload"]["hash"], callback)
+                except QBitError:
+                    self._respond(chat_id, "Operazione annullata.", {"inline_keyboard": []}, callback)
+            else:
+                self._respond(chat_id, "Operazione non più valida.", {"inline_keyboard": []}, callback)
+            return
+        expected = "delete_files" if action == "confirm" else "delete_menu"
+        operation = self._claim_delete_operation(operation_id, user_id, chat_id, expected)
+        if not operation:
+            self._respond(chat_id, "Conferma scaduta o già utilizzata.", {"inline_keyboard": []}, callback)
+            return
+        payload = operation["payload"]
+        if action == "files":
+            self.db.finish_operation(operation_id, "replaced")
+            try:
+                torrent = self.qbit.torrent(payload["hash"])
+            except QBitError:
+                self._respond(chat_id, "Il torrent non esiste più.", {"inline_keyboard": []}, callback)
+                return
+            next_id = self._new_delete_operation(user_id, chat_id, torrent, "delete_files")
+            text = (
+                "⚠️ <b>Eliminazione definitiva</b>\n"
+                "Stai per rimuovere il torrent e cancellare i file dal disco.\n"
+                "Questa operazione non può essere annullata.\n\n"
+                f"{html.escape(str(torrent.get('name', 'Torrent')))}"
+            )
+            size = torrent.get("total_size", torrent.get("size", 0))
+            if size:
+                text += f"\n💾 {human_size(size, 2, True, True)}"
+            self._respond(chat_id, text, final_delete_confirmation(next_id), callback, "HTML")
+            return
+        try:
+            self.remove_torrent(user_id, chat_id, payload["hash"], action == "confirm", callback)
+        except QBitError as exc:
+            self._respond(chat_id, str(exc), {"inline_keyboard": []}, callback)
+        finally:
+            self.db.finish_operation(operation_id, "completed")
 
     def server_status(self, chat_id):
         torrents, transfer = self.qbit.torrents(), self.qbit.transfer_info()
@@ -313,18 +414,17 @@ class Bot:
             info_hash, state = torrent.get("hash"), torrent.get("state", "")
             if not info_hash:
                 continue
-            complete = float(torrent.get("progress", 0)) >= 0.999999
-            if complete and not self.db.notification_sent(info_hash, "completed"):
-                if initialized:
-                    for user_id in self.settings.allowed_user_ids:
-                        self.telegram.send(
-                            user_id,
-                            f"✅ Download completato\n{torrent.get('name', 'Torrent')}",
-                            torrent_actions(info_hash),
-                        )
-                    if torrent.get("category") in {"Film", "Serie TV"}:
-                        self.scan_plex(0, 0, info_hash, True)
-                self.db.mark_notification(info_hash, "completed")
+            complete = is_complete(torrent)
+            if complete and self.db.mark_notification(info_hash, "completed") and initialized:
+                for user_id in self.settings.allowed_user_ids:
+                    self.telegram.send(
+                        user_id,
+                        completion_text(torrent, self.settings.timezone, self.settings.title_max_length),
+                        self._torrent_keyboard(torrent),
+                        "HTML",
+                    )
+                if self.plex.can_scan(torrent.get("category", "")):
+                    self.scan_plex(0, 0, info_hash, True)
             if state in ERROR_STATES:
                 key = f"error_count:{info_hash}"
                 count = int(self.db.get_setting(key, 0)) + 1
@@ -336,7 +436,7 @@ class Bot:
                         self.telegram.send(
                             user_id,
                             f"⚠️ Errore persistente\n{torrent.get('name', 'Torrent')}",
-                            torrent_actions(info_hash),
+                            self._torrent_keyboard(torrent),
                         )
                     self.db.mark_notification(info_hash, "error")
             else:
@@ -383,7 +483,7 @@ class Bot:
         if text.startswith("/help"):
             self.telegram.send(
                 chat_id,
-                "Comandi: /start, /help, /status, /search nome, /history, /server. Sono supportati Magnet URL, URL e file .torrent.",
+                "Comandi: /start, /help, /status, /search nome, /history, /server. Sono supportati Magnet URL, hash BitTorrent v1, URL e file .torrent.",
                 main_menu(),
             )
             return
@@ -413,7 +513,8 @@ class Bot:
             return
         if text == "➕ Aggiungi":
             self.telegram.send(
-                chat_id, "Invia un Magnet URL, un URL diretto .torrent o allega un file .torrent."
+                chat_id,
+                "Invia un Magnet URL, un hash BitTorrent v1, un URL diretto .torrent o allega un file .torrent.",
             )
             return
         if text == "💾 Disco":
@@ -460,9 +561,9 @@ class Bot:
         if not self.interaction_guard.allow((user_id, data)):
             self.telegram.answer_callback(callback["id"], "Operazione già ricevuta")
             return
+        self.telegram.answer_callback(callback["id"])
         parts = data.split(":")
         if parts[0] == "noop":
-            self.telegram.answer_callback(callback["id"])
             return
         if len(parts) == 3 and parts[0] == "cat":
             self.show_preview(callback, parts[1], parts[2])
@@ -470,53 +571,18 @@ class Bot:
             self.confirm(callback, parts[1])
         elif len(parts) == 2 and parts[0] == "cancel":
             self.db.finish_operation(parts[1], "cancelled")
-            self.telegram.answer_callback(callback["id"], "Annullato")
         elif len(parts) == 3 and parts[0] == "list":
-            self.list_torrents(chat_id, parts[1], int(parts[2]), user_id=user_id)
-            self.telegram.answer_callback(callback["id"])
+            self.list_torrents(chat_id, parts[1], int(parts[2]), user_id=user_id, callback=callback)
         elif len(parts) == 2 and parts[0] == "detail":
-            self.show_details(chat_id, parts[1])
-            self.telegram.answer_callback(callback["id"])
+            self.show_details(chat_id, parts[1], callback)
         elif len(parts) == 3 and parts[0] == "act":
-            self.torrent_action(user_id, chat_id, parts[1], parts[2])
-            self.telegram.answer_callback(callback["id"])
+            self.torrent_action(user_id, chat_id, parts[1], parts[2], callback)
+        elif len(parts) == 2 and parts[0] == "remove":
+            self.show_removal_menu(callback, parts[1])
         elif len(parts) == 3 and parts[0] == "delete":
-            kind, info_hash = parts[1], parts[2]
-            if kind == "torrent":
-                self.telegram.send(
-                    chat_id,
-                    "Confermi la rimozione del torrent? I file saranno conservati.",
-                    delete_confirmation(info_hash, False),
-                )
-            elif kind == "torrent_confirm":
-                self.remove_torrent(user_id, chat_id, info_hash, False)
-            elif kind == "files1":
-                self.telegram.send(
-                    chat_id,
-                    "Attenzione: verranno eliminati anche i file. Prima conferma.",
-                    delete_confirmation(info_hash, True, True),
-                )
-            elif kind == "files2":
-                self.telegram.send(
-                    chat_id,
-                    "Conferma finale: eliminare definitivamente torrent e file?",
-                    {
-                        "inline_keyboard": [
-                            [
-                                {
-                                    "text": "ELIMINA DEFINITIVAMENTE",
-                                    "callback_data": f"delete:files_confirm:{info_hash}",
-                                }
-                            ]
-                        ]
-                    },
-                )
-            elif kind == "files_confirm":
-                self.remove_torrent(user_id, chat_id, info_hash, True)
-            self.telegram.answer_callback(callback["id"])
+            self.handle_delete(callback, parts[1], parts[2])
         elif len(parts) == 2 and parts[0] == "plex":
             self.scan_plex(user_id, chat_id, parts[1])
-            self.telegram.answer_callback(callback["id"])
         elif len(parts) == 3 and parts[0] == "setting":
             if parts[1] == "queue":
                 self.db.set_setting("queue_limit", max(1, self.queue_limit() + int(parts[2])))
@@ -531,7 +597,6 @@ class Bot:
                 self.db.set_setting(key, {0: 1024, 1024: 2048, 2048: 5120}.get(current, 0))
                 self.db.set_setting("applied_limits", "")
             self.show_settings(chat_id)
-            self.telegram.answer_callback(callback["id"])
 
     def run(self):
         me = self.telegram.call("getMe")

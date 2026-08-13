@@ -3,6 +3,7 @@ import re
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 class ConfigError(ValueError):
@@ -65,6 +66,15 @@ def _time(name: str, default: str) -> str:
     return value
 
 
+def _timezone(name: str = "TZ", default: str = "UTC") -> str:
+    value = os.getenv(name, default)
+    try:
+        ZoneInfo(value)
+    except ZoneInfoNotFoundError as exc:
+        raise ConfigError(f"{name} deve essere una timezone IANA valida") from exc
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     telegram_token: str
@@ -98,6 +108,9 @@ class Settings:
     rate_limit_requests: int
     rate_limit_window: int
     button_debounce_seconds: int
+    delete_confirmation_seconds: int
+    title_max_length: int
+    timezone: str
     log_path: Path
     health_file: Path
     disk_check_path: str
@@ -153,6 +166,9 @@ class Settings:
             rate_limit_requests=_positive_int("RATE_LIMIT_REQUESTS", 12),
             rate_limit_window=_positive_int("RATE_LIMIT_WINDOW_SECONDS", 60),
             button_debounce_seconds=_positive_int("BUTTON_DEBOUNCE_SECONDS", 3),
+            delete_confirmation_seconds=_positive_int("DELETE_CONFIRMATION_SECONDS", 300),
+            title_max_length=min(_positive_int("TITLE_MAX_LENGTH", 70), 200),
+            timezone=_timezone(),
             log_path=Path(os.getenv("LOG_PATH", "/app/logs/bot.log")),
             health_file=Path(os.getenv("HEALTH_FILE", "/app/data/healthy")),
             disk_check_path=os.getenv("DISK_CHECK_PATH", base),

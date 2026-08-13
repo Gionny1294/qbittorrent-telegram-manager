@@ -41,3 +41,14 @@ class ConfigTests(unittest.TestCase):
         }
         with patch.dict(os.environ, env, clear=True), self.assertRaises(ConfigError):
             Settings.from_env()
+
+    def test_invalid_timezone_is_rejected(self):
+        env = {
+            "TELEGRAM_BOT_TOKEN": "test-token",
+            "ALLOWED_USER_IDS": "10",
+            "DEFAULT_SAVE_PATH": "/downloads",
+            "QBITTORRENT_URL": "http://qbittorrent:8080",
+            "TZ": "Mars/Olympus",
+        }
+        with patch.dict(os.environ, env, clear=True), self.assertRaises(ConfigError):
+            Settings.from_env()

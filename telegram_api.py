@@ -28,15 +28,25 @@ class TelegramAPI:
             raise TelegramError("Telegram non ha accettato la richiesta")
         return result["result"]
 
-    def send(self, chat_id, text, keyboard=None):
+    def send(self, chat_id, text, keyboard=None, parse_mode=None):
         chunks = self._chunks(str(text), 4000)
         result = None
         for index, chunk in enumerate(chunks):
             data = {"chat_id": chat_id, "text": chunk}
+            if parse_mode:
+                data["parse_mode"] = parse_mode
             if keyboard and index == len(chunks) - 1:
                 data["reply_markup"] = json.dumps(keyboard)
             result = self.call("sendMessage", data)
         return result
+
+    def edit(self, chat_id, message_id, text, keyboard=None, parse_mode=None):
+        data = {"chat_id": chat_id, "message_id": message_id, "text": str(text)[:4000]}
+        if keyboard is not None:
+            data["reply_markup"] = json.dumps(keyboard)
+        if parse_mode:
+            data["parse_mode"] = parse_mode
+        return self.call("editMessageText", data)
 
     @staticmethod
     def _chunks(text, limit):

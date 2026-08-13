@@ -18,9 +18,12 @@ class PlexClient:
     def configured(self):
         return bool(self.url and self.token)
 
+    def can_scan(self, category):
+        return self.configured and bool(self.sections.get(category, ""))
+
     def scan(self, category):
         section = self.sections.get(category, "")
-        if not self.configured or not section:
+        if not self.can_scan(category):
             return False, "Plex non configurato per questa categoria"
         url = f"{self.url}/library/sections/{urllib.parse.quote(section)}/refresh?X-Plex-Token={urllib.parse.quote(self.token)}"
         for attempt in range(self.retries):

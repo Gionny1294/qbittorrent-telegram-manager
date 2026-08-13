@@ -143,8 +143,12 @@ class Database:
 
     def mark_notification(self, torrent_hash, event):
         with self.lock, self.connection:
-            self.connection.execute(
-                "INSERT OR IGNORE INTO notifications VALUES (?,?,?)", (torrent_hash, event, int(time.time()))
+            return (
+                self.connection.execute(
+                    "INSERT OR IGNORE INTO notifications VALUES (?,?,?)",
+                    (torrent_hash, event, int(time.time())),
+                ).rowcount
+                == 1
             )
 
     def close(self):

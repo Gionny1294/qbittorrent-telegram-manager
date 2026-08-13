@@ -14,6 +14,7 @@ Licensed under the [MIT License](LICENSE).
 - Active, paused, completed and failed views; search, pagination and torrent details
 - Pause, resume, force-start, recheck and carefully confirmed deletion
 - Persistent SQLite history and de-duplicated completion/error notifications
+- Compact completion cards, state-aware actions and expiring removal confirmations
 - Smart queue, normal/night speed profiles and server health view
 - Optional, non-blocking Plex library refresh
 - Rootless, read-only Docker container with healthcheck and resource limits
@@ -74,6 +75,8 @@ Enable qBittorrent's Web UI, create dedicated credentials and restrict access to
 Credentials are required when qBittorrent authentication is enabled. Category paths are paths visible to qBittorrent. `MEDIA_ROOT_HOST` is mounted read-only into the bot only to measure free space.
 
 Plex is disabled when `PLEX_URL` or `PLEX_TOKEN` is empty. To enable it, also set the movie and TV section IDs.
+
+`TITLE_MAX_LENGTH` limits notification titles without renaming torrents or files. `DELETE_CONFIRMATION_SECONDS` controls destructive-confirmation expiry, and `TZ` controls displayed local times.
 
 ## Commands
 

@@ -20,6 +20,7 @@ class TorrentManagementTests(unittest.TestCase):
 
     def test_pause_and_resume(self):
         self.bot.torrent_action(10, 10, "pause", "a" * 40)
+        self.qbit.items[0]["state"] = "stoppedDL"
         self.bot.torrent_action(10, 10, "resume", "a" * 40)
         self.assertEqual(self.qbit.actions, [("pause", "a" * 40), ("resume", "a" * 40)])
 

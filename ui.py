@@ -33,11 +33,13 @@ def confirm_keyboard(operation_id):
     }
 
 
-def human_size(value):
+def human_size(value, decimals=1, decimal_comma=False, compact_units=False):
     value = float(value or 0)
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if value < 1024 or unit == "TiB":
-            return f"{value:.1f} {unit}"
+    units = ("B", "KB", "MB", "GB", "TB") if compact_units else ("B", "KiB", "MiB", "GiB", "TiB")
+    for index, unit in enumerate(units):
+        if value < 1024 or index == len(units) - 1:
+            rendered = f"{value:.{decimals}f}"
+            return f"{rendered.replace('.', ',') if decimal_comma else rendered} {unit}"
         value /= 1024
 
 
@@ -61,33 +63,49 @@ def torrent_list_keyboard(items, group, page, pages):
     return {"inline_keyboard": rows}
 
 
-def torrent_actions(info_hash):
+def torrent_actions(torrent, plex_available=False):
+    from torrent_manager import supported_actions
+
+    info_hash = torrent["hash"]
+    actions = supported_actions(torrent)
+    rows = []
+    common = []
+    if "refresh" in actions:
+        common.append({"text": "🔄 Aggiorna", "callback_data": f"detail:{info_hash}"})
+    common.append({"text": "ℹ️ Dettagli", "callback_data": f"detail:{info_hash}"})
+    rows.append(common[:2])
+    state_action = next((item for item in ("pause", "resume", "force", "retry") if item in actions), None)
+    if state_action:
+        labels = {
+            "pause": "⏸ Pausa",
+            "resume": "▶️ Riprendi",
+            "force": "⏩ Forza avvio",
+            "retry": "🔁 Riprova",
+        }
+        rows.append([{"text": labels[state_action], "callback_data": f"act:{state_action}:{info_hash}"}])
+    if "completed_list" in actions:
+        rows[0].append({"text": "📂 Altri completati", "callback_data": "list:completed:0"})
+        if plex_available:
+            rows.append([{"text": "🎬 Scansiona Plex", "callback_data": f"plex:{info_hash}"}])
+    rows.append([{"text": "🗑 Gestisci rimozione", "callback_data": f"remove:{info_hash}"}])
+    return {"inline_keyboard": rows}
+
+
+def removal_menu(operation_id):
     return {
         "inline_keyboard": [
-            [{"text": "🔄 Aggiorna", "callback_data": f"detail:{info_hash}"}],
-            [
-                {"text": "⏸ Pausa", "callback_data": f"act:pause:{info_hash}"},
-                {"text": "▶️ Riprendi", "callback_data": f"act:resume:{info_hash}"},
-            ],
-            [
-                {"text": "⏩ Forza avvio", "callback_data": f"act:force:{info_hash}"},
-                {"text": "🔁 Riprova", "callback_data": f"act:retry:{info_hash}"},
-            ],
-            [{"text": "🗑 Rimuovi torrent", "callback_data": f"delete:torrent:{info_hash}"}],
-            [{"text": "🔥 Rimuovi torrent e file", "callback_data": f"delete:files1:{info_hash}"}],
-            [{"text": "🎬 Scansiona Plex", "callback_data": f"plex:{info_hash}"}],
+            [{"text": "🗑 Solo torrent", "callback_data": f"delete:keep:{operation_id}"}],
+            [{"text": "⚠️ Torrent e file", "callback_data": f"delete:files:{operation_id}"}],
+            [{"text": "↩️ Annulla", "callback_data": f"delete:cancel:{operation_id}"}],
         ]
     }
 
 
-def delete_confirmation(info_hash, with_files, second=False):
-    kind = "files2" if with_files and second else "files1" if with_files else "torrent_confirm"
+def final_delete_confirmation(operation_id):
     return {
         "inline_keyboard": [
-            [
-                {"text": "Conferma eliminazione", "callback_data": f"delete:{kind}:{info_hash}"},
-                {"text": "Annulla", "callback_data": f"detail:{info_hash}"},
-            ]
+            [{"text": "🔥 Conferma eliminazione", "callback_data": f"delete:confirm:{operation_id}"}],
+            [{"text": "↩️ Annulla", "callback_data": f"delete:cancel:{operation_id}"}],
         ]
     }
 
