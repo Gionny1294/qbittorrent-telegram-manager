@@ -76,6 +76,7 @@ Per Plex compilare `PLEX_URL`, `PLEX_TOKEN`, `PLEX_MOVIE_SECTION_ID` e `PLEX_SER
 - `/start`: menu;
 - `/help`: guida;
 - `/status`: download attivi;
+- `/downloads`: tutti i torrent attualmente in download;
 - `/search nome`: ricerca;
 - `/server`: stato qBittorrent, disco, RAM e carico;
 - `/history`: cronologia operazioni.

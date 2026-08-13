@@ -52,6 +52,7 @@ from validators import (
 log = logging.getLogger("bot")
 GROUP_LABELS = {
     "active": "Download attivi",
+    "downloading": "Torrent in download",
     "paused": "Torrent in pausa",
     "completed": "Torrent completati",
     "error": "Torrent in errore",
@@ -213,21 +214,32 @@ class Bot:
             if self.qbit.contains(payload["hash"]):
                 raise DuplicateTorrent("Questo torrent è già presente in qBittorrent")
             category = CATEGORIES[payload["category"]]
-            if operation["kind"] == "magnet":
-                self.qbit.add_url(payload["source"], path, category)
-            else:
-                pending = payload.get("pending_file")
-                if pending:
-                    with open(pending, "rb") as handle:
-                        content = handle.read()
+            try:
+                if operation["kind"] == "magnet":
+                    self.qbit.add_url(payload["source"], path, category)
                 else:
-                    content = self.telegram.download_url(
-                        payload["source"], self.settings.max_torrent_file_bytes
-                    )
-                self.qbit.add_file(payload["filename"], content, path, category)
-                if pending:
-                    with suppress(OSError):
-                        os.unlink(pending)
+                    pending = payload.get("pending_file")
+                    if pending:
+                        with open(pending, "rb") as handle:
+                            content = handle.read()
+                    else:
+                        content = self.telegram.download_url(
+                            payload["source"], self.settings.max_torrent_file_bytes
+                        )
+                    self.qbit.add_file(payload["filename"], content, path, category)
+                    if pending:
+                        with suppress(OSError):
+                            os.unlink(pending)
+            except QBitError:
+                # Some qBittorrent versions/proxies return a non-standard body
+                # even though the add request has already succeeded. The torrent
+                # hash is the authoritative confirmation in that ambiguous case.
+                if not self.qbit.contains(payload["hash"]):
+                    raise
+                log.warning(
+                    "Risposta di aggiunta ambigua, torrent presente ref=%s",
+                    safe_reference(payload["hash"]),
+                )
         except Exception:
             self.db.release_operation(operation_id)
             raise
@@ -483,7 +495,7 @@ class Bot:
         if text.startswith("/help"):
             self.telegram.send(
                 chat_id,
-                "Comandi: /start, /help, /status, /search nome, /history, /server. Sono supportati Magnet URL, hash BitTorrent v1, URL e file .torrent.",
+                "Comandi: /start, /help, /status, /downloads, /search nome, /history, /server. Sono supportati Magnet URL, hash BitTorrent v1, URL e file .torrent.",
                 main_menu(),
             )
             return
@@ -504,6 +516,9 @@ class Bot:
         }
         if text.startswith("/status"):
             self.list_torrents(chat_id, "active", user_id=user_id)
+            return
+        if text.startswith("/downloads"):
+            self.list_torrents(chat_id, "downloading", user_id=user_id)
             return
         if text in menu_groups:
             self.list_torrents(chat_id, menu_groups[text], user_id=user_id)

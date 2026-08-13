@@ -83,6 +83,7 @@ Plex is disabled when `PLEX_URL` or `PLEX_TOKEN` is empty. To enable it, also se
 - `/start` — main menu
 - `/help` — usage summary
 - `/status` — active downloads
+- `/downloads` — all torrents currently downloading
 - `/search name` — search torrents
 - `/server` — qBittorrent, disk, RAM and load status
 - `/history` — recent audited operations

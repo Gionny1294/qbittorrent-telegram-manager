@@ -69,7 +69,9 @@ def torrent_group(torrent):
 
 def filter_torrents(torrents, group=None, query=None):
     result = torrents
-    if group:
+    if group == "downloading":
+        result = [torrent for torrent in result if normalized_state(torrent) == "downloading"]
+    elif group:
         result = [torrent for torrent in result if torrent_group(torrent) == group]
     if query:
         lowered = query.lower()
