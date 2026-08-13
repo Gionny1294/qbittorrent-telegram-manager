@@ -1,0 +1,11 @@
+title = "qBittorrent Telegram Bot gitleaks configuration"
+
+[allowlist]
+description = "Known synthetic values used by unit tests"
+paths = [
+  '''^\.env$''',
+  '''^data/''',
+  '''^logs/''',
+  '''\.bak(?:-|$)''',
+  '''tests/test_validators\.py''',
+]
