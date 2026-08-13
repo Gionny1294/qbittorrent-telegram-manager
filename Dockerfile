@@ -1,4 +1,4 @@
-FROM python:3.13-alpine
+FROM python:3.14-alpine
 
 ARG APP_UID=1000
 ARG APP_GID=1000
