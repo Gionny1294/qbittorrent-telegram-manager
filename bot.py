@@ -8,9 +8,11 @@ import time
 import urllib.parse
 import uuid
 from contextlib import suppress
+from pathlib import Path
 
 from config import Settings
 from database import Database
+from media_processor import MediaProcessingError, compress_video, video_files
 from plex_client import PlexClient
 from qbittorrent_client import DuplicateTorrent, QBitClient, QBitError
 from security import InteractionGuard, RateLimiter, configure_logging, is_authorized, safe_reference
@@ -28,12 +30,13 @@ from torrent_manager import (
     system_metrics,
 )
 from ui import (
-    CATEGORIES,
     category_keyboard,
+    compression_confirmation,
     confirm_keyboard,
     final_delete_confirmation,
     human_size,
     main_menu,
+    other_folder_keyboard,
     removal_menu,
     settings_keyboard,
     torrent_actions,
@@ -84,6 +87,7 @@ class Bot:
         self.monitor_thread = None
         self.rate_limiter = RateLimiter(settings.rate_limit_requests, settings.rate_limit_window)
         self.interaction_guard = InteractionGuard(settings.button_debounce_seconds)
+        self.compression_lock = threading.Lock()
 
     def touch_health(self):
         self.settings.health_file.parent.mkdir(parents=True, exist_ok=True)
@@ -99,7 +103,31 @@ class Bot:
 
     @property
     def allowed_roots(self):
-        return tuple(set(self.settings.category_paths.values()) | {self.settings.default_save_path})
+        return (self.settings.default_save_path,)
+
+    def destination_options(self):
+        root = Path(self.settings.default_save_path)
+        try:
+            folders = sorted(
+                (
+                    item
+                    for item in root.iterdir()
+                    if item.is_dir() and not item.name.startswith(".") and item.name != "lost+found"
+                ),
+                key=lambda item: item.name.casefold(),
+            )
+        except OSError as exc:
+            raise QBitError("Impossibile leggere le cartelle di destinazione") from exc
+        if not folders:
+            raise QBitError("Non ci sono cartelle disponibili per il salvataggio")
+        options = {}
+        for key, name in (("film", "Film"), ("animazione", "Animazione")):
+            folder = next((item for item in folders if item.name.casefold() == name.casefold()), None)
+            if folder:
+                options[key] = {"label": folder.name[:48], "path": str(folder)}
+        for index, folder in enumerate(item for item in folders if item.name.casefold() not in {"film", "animazione"}):
+            options[f"other_{index}"] = {"label": folder.name[:48], "path": str(folder)}
+        return options
 
     def queue_limit(self):
         return max(1, int(self.db.get_setting("queue_limit", self.settings.default_queue_limit)))
@@ -169,17 +197,36 @@ class Bot:
             pending_file = pending_dir / f"{operation_id}.torrent"
             pending_file.write_bytes(content)
             payload["pending_file"] = str(pending_file)
+        destinations = self.destination_options()
+        payload["destinations"] = destinations
         self.db.create_operation(operation_id, user_id, kind, payload)
-        self.telegram.send(chat_id, "Scegli la categoria:", category_keyboard(operation_id))
+        self.telegram.send(
+            chat_id,
+            "Scegli la cartella di salvataggio:",
+            category_keyboard(operation_id, [("film", "Film"), ("animazione", "Animazione"), ("altro", "Altro")]),
+        )
 
     def show_preview(self, callback, operation_id, category):
         user_id, chat_id = callback["from"]["id"], callback["message"]["chat"]["id"]
         operation = self.db.claim_operation(operation_id, user_id)
-        if not operation or category not in CATEGORIES:
+        destinations = (operation or {}).get("payload", {}).get("destinations", {})
+        if operation and category == "altro":
+            other = [(key, value["label"]) for key, value in destinations.items() if key.startswith("other_")]
+            if not other:
+                self._respond(chat_id, "Non ci sono altre cartelle disponibili.", {"inline_keyboard": []}, callback)
+                return
+            self.db.finish_operation(operation_id, "replaced")
+            next_id = uuid.uuid4().hex[:16]
+            self.db.create_operation(next_id, user_id, operation["kind"], operation["payload"])
+            self.telegram.send(chat_id, "Scegli una delle altre cartelle:", other_folder_keyboard(next_id, other))
+            return
+        destination = destinations.get(category)
+        if not operation or not isinstance(destination, dict):
             self._respond(chat_id, "Operazione scaduta.", {"inline_keyboard": []}, callback)
             return
-        path = safe_destination(self.settings.category_paths[category], self.allowed_roots)
-        payload = operation["payload"] | {"category": category}
+        path = safe_destination(destination.get("path", ""), self.allowed_roots)
+        label = destination.get("label", "Cartella")
+        payload = operation["payload"] | {"destination": {"label": label, "path": path}}
         self.db.finish_operation(operation_id, "replaced")
         next_id = uuid.uuid4().hex[:16]
         self.db.create_operation(next_id, user_id, operation["kind"], payload)
@@ -192,7 +239,7 @@ class Bot:
         )
         text = (
             f"Anteprima torrent\nNome: {payload['name']}\nHash: {payload['hash']}\nTracker: {payload['tracker']}\n"
-            f"Categoria: {CATEGORIES[category]}\nDestinazione: {path}\nDimensione: {human_size(payload['size']) if payload['size'] else 'non disponibile'}\n"
+            f"Cartella: {label}\nDestinazione: {path}\nDimensione: {human_size(payload['size']) if payload['size'] else 'non disponibile'}\n"
             f"File: {file_text}\nSpazio libero: {human_size(free) if free is not None else 'non disponibile'}"
         )
         self.telegram.send(chat_id, text, confirm_keyboard(next_id))
@@ -205,7 +252,17 @@ class Bot:
             return
         payload = operation["payload"]
         try:
-            path = safe_destination(self.settings.category_paths[payload["category"]], self.allowed_roots)
+            destination = payload.get("destination")
+            if not isinstance(destination, dict):
+                legacy_category = payload.get("category")
+                if legacy_category in self.settings.category_paths:
+                    destination = {
+                        "label": legacy_category,
+                        "path": self.settings.category_paths[legacy_category],
+                    }
+                else:
+                    raise ValidationError("Destinazione non valida")
+            path = safe_destination(destination.get("path", ""), self.allowed_roots)
             free, size = self.qbit.disk_free(self.settings.disk_check_path), payload.get("size", 0)
             if free is not None and size and free < size:
                 self.db.finish_operation(operation_id, "no_space")
@@ -213,7 +270,7 @@ class Bot:
                 return
             if self.qbit.contains(payload["hash"]):
                 raise DuplicateTorrent("Questo torrent è già presente in qBittorrent")
-            category = CATEGORIES[payload["category"]]
+            category = destination.get("label", "Download")
             try:
                 if operation["kind"] == "magnet":
                     self.qbit.add_url(payload["source"], path, category)
@@ -334,6 +391,66 @@ class Bot:
         if size:
             text += f"\n💾 {human_size(size, 2, True, True)}"
         self._respond(chat_id, text, removal_menu(operation_id), callback, "HTML")
+
+    def show_compression_menu(self, callback, info_hash):
+        chat_id, user_id = callback["message"]["chat"]["id"], callback["from"]["id"]
+        torrent = self.qbit.torrent(info_hash)
+        if not is_complete(torrent):
+            self._respond(chat_id, "La compressione è disponibile solo per torrent completati.", {"inline_keyboard": []}, callback)
+            return
+        content_path = self.qbit.properties(info_hash).get("content_path", "")
+        files = video_files(content_path, self.settings.default_save_path)
+        if not files:
+            self._respond(chat_id, "Non ho trovato video comprimibili per questo torrent.", {"inline_keyboard": []}, callback)
+            return
+        operation_id = uuid.uuid4().hex[:16]
+        self.db.create_operation(operation_id, user_id, "compress", {"chat_id": chat_id, "hash": info_hash, "content_path": content_path})
+        self._respond(
+            chat_id,
+            f"⚠️ Comprimerò {len(files)} video in H.264/MP4 per Plex. Se esiste, manterrò solo l'audio italiano. Gli originali saranno eliminati solo dopo la verifica dei nuovi file.",
+            compression_confirmation(operation_id),
+            callback,
+        )
+
+    def handle_compression(self, callback, action, operation_id):
+        chat_id, user_id = callback["message"]["chat"]["id"], callback["from"]["id"]
+        if action == "cancel":
+            self.db.finish_operation(operation_id, "cancelled")
+            self._respond(chat_id, "Compressione annullata.", {"inline_keyboard": []}, callback)
+            return
+        operation = self.db.claim_operation(operation_id, user_id)
+        if not operation or operation["kind"] != "compress" or operation["payload"].get("chat_id") != chat_id:
+            self._respond(chat_id, "Conferma scaduta o non valida.", {"inline_keyboard": []}, callback)
+            return
+        if not self.compression_lock.acquire(blocking=False):
+            self.db.release_operation(operation_id)
+            self._respond(chat_id, "È già in corso un'altra compressione.", {"inline_keyboard": []}, callback)
+            return
+        self._respond(chat_id, "🎞 Compressione avviata in background. Il bot non fermerà il torrent; al termine, qBittorrent rileverà i file sostituiti.", {"inline_keyboard": []}, callback)
+        threading.Thread(target=self._compress_worker, args=(operation_id, user_id, chat_id, operation["payload"]), daemon=True).start()
+
+    def _compress_worker(self, operation_id, user_id, chat_id, payload):
+        try:
+            files = video_files(payload["content_path"], self.settings.default_save_path)
+            converted = []
+            italian = 0
+            for source in files:
+                target, has_italian = compress_video(source)
+                converted.append(target.name)
+                italian += int(has_italian)
+            if not converted:
+                raise MediaProcessingError("Non ho trovato video comprimibili")
+            self.db.finish_operation(operation_id, "completed")
+            self.db.record(user_id, "compressed", payload["hash"], ", ".join(converted))
+            self.telegram.send(chat_id, f"✅ Compressione completata: {len(converted)} file. Originali eliminati dopo verifica. Audio italiano disponibile in {italian} file.")
+            if self.plex.can_scan(self.qbit.torrent(payload["hash"]).get("category", "")):
+                self.scan_plex(user_id, chat_id, payload["hash"], True)
+        except Exception as exc:
+            self.db.finish_operation(operation_id, "failed")
+            log.exception("Compressione non riuscita")
+            self.telegram.send(chat_id, f"⚠️ Compressione non riuscita: {exc}. Gli originali non elaborati sono stati conservati.")
+        finally:
+            self.compression_lock.release()
 
     def handle_delete(self, callback, action, operation_id):
         chat_id, user_id = callback["message"]["chat"]["id"], callback["from"]["id"]
@@ -594,6 +711,10 @@ class Bot:
             self.torrent_action(user_id, chat_id, parts[1], parts[2], callback)
         elif len(parts) == 2 and parts[0] == "remove":
             self.show_removal_menu(callback, parts[1])
+        elif len(parts) == 2 and parts[0] == "compress":
+            self.show_compression_menu(callback, parts[1])
+        elif len(parts) == 3 and parts[0] == "compress":
+            self.handle_compression(callback, parts[1], parts[2])
         elif len(parts) == 3 and parts[0] == "delete":
             self.handle_delete(callback, parts[1], parts[2])
         elif len(parts) == 2 and parts[0] == "plex":
