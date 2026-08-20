@@ -35,8 +35,8 @@ Screenshot placeholder: add a redacted menu screenshot here before the first rel
 ## Quick start with Docker
 
 ```bash
-git clone URL_OF_THE_REPOSITORY
-cd REPOSITORY_NAME
+git clone https://github.com/Gionny1294/qbittorrent-telegram-manager.git
+cd qbittorrent-telegram-manager
 cp .env.example .env
 mkdir -p data logs downloads
 chmod 600 .env
@@ -45,6 +45,10 @@ docker compose config
 docker compose up -d --build
 docker compose ps
 ```
+
+The command above is safe to paste into a terminal: it downloads only the public source code. Before starting the container, edit `.env` locally with your own Telegram token, Telegram user ID and qBittorrent credentials; never commit that file.
+
+The Compose file joins the external Docker network `qbittorrent_default` so the bot can reach a qBittorrent service named `qbittorrent`. If your qBittorrent Compose project uses another network name, change the `networks.qbittorrent.name` value before running `docker compose up`.
 
 View logs with `docker compose logs -f`. Stop with `docker compose stop`.
 
@@ -72,7 +76,7 @@ Enable qBittorrent's Web UI, create dedicated credentials and restrict access to
 - `QBITTORRENT_URL`
 - `DEFAULT_SAVE_PATH`
 
-Credentials are required when qBittorrent authentication is enabled. Category paths are paths visible to qBittorrent. `MEDIA_ROOT_HOST` is mounted read-only into the bot only to measure free space.
+Credentials are required when qBittorrent authentication is enabled. `MEDIA_ROOT_HOST` is mounted at `/media`; it must match a path mounted in qBittorrent so selected destinations and free-space checks refer to the same storage.
 
 Plex is disabled when `PLEX_URL` or `PLEX_TOKEN` is empty. To enable it, also set the movie and TV section IDs.
 
@@ -87,6 +91,12 @@ Plex is disabled when `PLEX_URL` or `PLEX_TOKEN` is empty. To enable it, also se
 - `/search name` — search torrents
 - `/server` — qBittorrent, disk, RAM and load status
 - `/history` — recent audited operations
+
+## Plex-compatible compression
+
+For completed torrents, open the torrent details and select **Compress for Plex**. The bot asks for an explicit confirmation, then converts video files to H.264/AAC MP4. If an Italian audio track is present, only Italian audio is kept; otherwise the available audio tracks are retained. Each original is deleted only after its replacement passes validation.
+
+Compression is never automatic and does not pause or remove the torrent. Since compressed files no longer match the torrent payload, do not use the action while you need to seed that torrent.
 
 ## Manual installation
 

@@ -1,6 +1,3 @@
-CATEGORIES = {"film": "Film", "serie_tv": "Serie TV", "musica": "Musica", "altro": "Altro"}
-
-
 def main_menu():
     return {
         "keyboard": [
@@ -13,11 +10,20 @@ def main_menu():
     }
 
 
-def category_keyboard(operation_id):
+def category_keyboard(operation_id, destinations):
     return {
         "inline_keyboard": [
             [{"text": label, "callback_data": f"cat:{operation_id}:{key}"}]
-            for key, label in CATEGORIES.items()
+            for key, label in destinations
+        ]
+    }
+
+
+def other_folder_keyboard(operation_id, destinations):
+    return {
+        "inline_keyboard": [
+            [{"text": label, "callback_data": f"cat:{operation_id}:{key}"}]
+            for key, label in destinations
         ]
     }
 
@@ -85,10 +91,20 @@ def torrent_actions(torrent, plex_available=False):
         rows.append([{"text": labels[state_action], "callback_data": f"act:{state_action}:{info_hash}"}])
     if "completed_list" in actions:
         rows[0].append({"text": "📂 Altri completati", "callback_data": "list:completed:0"})
+        rows.append([{"text": "🎞 Comprimi per Plex", "callback_data": f"compress:{info_hash}"}])
         if plex_available:
             rows.append([{"text": "🎬 Scansiona Plex", "callback_data": f"plex:{info_hash}"}])
     rows.append([{"text": "🗑 Gestisci rimozione", "callback_data": f"remove:{info_hash}"}])
     return {"inline_keyboard": rows}
+
+
+def compression_confirmation(operation_id):
+    return {
+        "inline_keyboard": [
+            [{"text": "✅ Comprimi ed elimina gli originali", "callback_data": f"compress:confirm:{operation_id}"}],
+            [{"text": "↩️ Annulla", "callback_data": f"compress:cancel:{operation_id}"}],
+        ]
+    }
 
 
 def removal_menu(operation_id):
